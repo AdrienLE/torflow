@@ -118,14 +118,22 @@ read_timeout=120.0
 min_node_bw=1024
 
 firefox_headers = [
-  ('User-Agent','Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'),
-  ['Accept','text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'],
-  ('Accept-Language',"en-us,en;q=0.5"),
-  ('Accept-Encoding',"gzip,deflate"),
-  ('Accept-Charset', "ISO-8859-1,utf-8;q=0.7,*;q=0.7"),
-  ('Keep-Alive',"300"),
-  ('Connection',"keep-alive")
+    ('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.8; rv:19.0) Gecko/20100101 Firefox/19.0'),
+    ['Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'],
+    ('Accept-Language', 'en-US,en;q=0.5'),
+    ('Accept-Encoding', 'gzip, deflate'),
+    ('Connection', 'keep-alive')
 ]
+
+#firefox_headers = [
+#  ('User-Agent','Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'),
+#  ['Accept','text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'],
+#  ('Accept-Language',"en-us,en;q=0.5"),
+#  ('Accept-Encoding',"gzip,deflate"),
+#  ('Accept-Charset', "ISO-8859-1,utf-8;q=0.7,*;q=0.7"),
+#  ('Keep-Alive',"300"),
+#  ('Connection',"keep-alive")
+#]
 image_accept_hdr = "image/png,image/*;q=0.8,*/*;q=0.5"
 script_accept_hdr = "*/*"
 
