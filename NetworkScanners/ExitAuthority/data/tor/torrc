@@ -1,6 +1,6 @@
 ## Configuration file for metatroller on alternate prot
-SocksPort 9210 # what port to advertise for application connections
-ControlPort 9211
+SocksPort 9410 # what port to advertise for application connections
+ControlPort 9411
 SafeLogging 0
 Log info file ./data/tor.log
 DataDirectory ./data/tor/

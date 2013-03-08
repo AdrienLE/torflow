@@ -281,4 +281,5 @@ http_content_dir = soat_dir + 'http/content/'
 http_failed_dir = soat_dir + 'http/failed/'
 http_inconclusive_dir = soat_dir + 'http/inconclusive/'
 http_falsepositive_dir = soat_dir + 'http/falsepositive/'
-
+check_send_mail_content_dir = soat_dir + 'check_mail/send/'
+torrent_content_dir = 'torrent/content'

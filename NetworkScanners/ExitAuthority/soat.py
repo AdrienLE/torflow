@@ -45,6 +45,11 @@ import urllib
 import urllib2
 import urlparse
 import zlib,gzip
+import poplib
+import imaplib
+import datetime
+import base64
+import sha
 import struct
 
 import Queue
@@ -73,6 +78,11 @@ else:
         sys.path.insert(0, "../libs/BeautifulSoup")
 from BeautifulSoup import Tag, SoupStrainer, BeautifulSoup
 
+
+try:
+  import bzrlib.bencode
+except:
+  pass # If that doesn't work, it won't be possible to test torrent
 
 from libsoat import *
 from soat_config import *
@@ -114,7 +124,7 @@ scanhdlr=None
 datahandler=None
 linebreak = '\r\n'
 
-# Do NOT modify this object directly after it is handed to PathBuilder
+# Do NOT modify this object directly after it is handed to 
 # Use PathBuilder.schedule_selmgr instead.
 # (Modifying the arguments here is OK)
 __selmgr = PathSupport.SelectionManager(
@@ -366,6 +376,10 @@ class ExitScanHandler(ScanSupport.ScanHandler):
 class Http_Return:
   def __init__(self, rt):
     (self.code, self.headers, self.new_cookies, self.mime_type, self.content) = rt
+
+# Mail checking
+def get_mail(address, password, hostname):
+  pass
 
 # HTTP request handling
 def http_request(address, cookie_jar=None, headers=firefox_headers):
@@ -770,6 +784,7 @@ class Test:
       self.nodes &= self.rescan_nodes
     if not self.nodes:
       plog("ERROR", "No nodes remain after rescan load!")
+    print self.nodes
     self.scan_nodes = len(self.nodes)
     self.nodes_to_mark = self.scan_nodes*self.tests_per_node
     scanhdlr._sanity_check(map(lambda id: self.node_map[id],
@@ -2141,6 +2156,249 @@ class POP3STest(Test):
     datahandler.saveResult(result)
     return TEST_SUCCESS
 
+
+log_file = None
+free_emails = None
+real_targets = None
+mailtest_result = None
+target_nodes = None
+target_allocated_nodes_filename = None
+
+class MailTest(Test):
+  def __init__(self, target_file, name, port):
+    global log_file
+    self.target_file = target_file
+    Test.__init__(self, name, port)
+    log_file = open('mailtest.log', 'a+')
+
+  def get_targets(self):
+    global free_emails, real_targets, mailtest_result, target_nodes, target_allocated_nodes_filename
+    if mailtest_result is None:
+      target_allocated_nodes_filename = self.target_file + '.nodes.'
+      open(target_allocated_nodes_filename, 'a+') # create the file if it doesn't exist
+      target_nodes = dict([tuple(line.split(';')) for line in open(target_allocated_nodes_filename).read().split('\n') if line != ''])
+      mailtest_result = [tuple(email_pass.split(';')) for email_pass in open(self.target_file).read().split('\n')[:-1]]
+      real_targets = dict(mailtest_result)
+      free_emails = sorted(list(set(real_targets.keys()) - set(target_nodes.values())))
+      free_emails.reverse()
+      print free_emails
+    return mailtest_result
+
+  def run_test(self):
+    global free_emails, real_targets, mailtest_result, target_nodes, target_allocated_nodes_filename
+    self.tests_run += 1
+    need_to_save = False
+    if self.current_exit_idhex not in target_nodes:
+      need_to_save = True
+      email = free_emails.pop()
+      target_nodes[self.current_exit_idhex] = email
+      f = open(target_allocated_nodes_filename, 'a')
+      f.write('%s;%s\n' % (self.current_exit_idhex, target_nodes[self.current_exit_idhex]))
+    else:
+      email = target_nodes[self.current_exit_idhex]
+    try:
+      result = self.check_target((email, real_targets[email]))
+    except socks.Socks5Error:
+      plog("WARN", "Got a proxy error (probably timeout). Will try this node again later")
+      return TEST_INCONCLUSIVE
+    except:
+      plog("WARN", "Received unknown exception: %s" % str(sys.exc_info()[0]))
+      return TEST_INCONCLUSIVE
+    return result
+
+  def print_connection(self, username, hostname, typ, comment=''):
+    global log_file
+    log_file.write('%s@%s;%s;%s;%s;%s\n' % (username, hostname,
+      datetime.datetime.utcnow().strftime('%b %d %T'), typ, self.current_exit_idhex,
+      base64.b64encode(comment)))
+    log_file.flush()
+
+
+
+class CheckPOP3MailTest(MailTest):
+  def __init__(self, target_file):
+    MailTest.__init__(self, target_file, "RECEIVEMAIL", 110)
+
+  def check_target(self, target):
+    defaultsocket = socket.socket
+    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,
+                          TorUtil.tor_host, TorUtil.tor_port)
+    socket.socket = socks.socksocket
+
+    username, hostname = target[0].split('@')
+    s = poplib.POP3(hostname, 110)
+    s.user('%s@%s' % (username, hostname))
+    s.pass_(target[1])
+    plog('INFO', 'Email list: %s' % str(s.list()))
+    s.quit()
+
+    exit_node = scanhdlr.get_exit_node()
+    if not exit_node:
+      return TEST_INCONCLUSIVE
+    self.print_connection(username, hostname, 'POP3')
+
+    socket.socket = defaultsocket
+
+    return TEST_SUCCESS
+
+
+class CheckIMAP4MailTest(MailTest):
+  def __init__(self, target_file):
+    MailTest.__init__(self, target_file, "RECEIVEMAILIMAP", 143)
+
+  def check_target(self, target):
+    defaultsocket = socket.socket
+    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,
+                          TorUtil.tor_host, TorUtil.tor_port)
+    socket.socket = socks.socksocket
+
+    username, hostname = target[0].split('@')
+    s = imaplib.IMAP4(hostname, 143)
+    s.login('%s@%s' % (username, hostname), target[1])
+    plog('INFO', 'Email list (IMAP): %s' % str(s.list()))
+    s.logout()
+
+    exit_node = scanhdlr.get_exit_node()
+    if not exit_node:
+      return TEST_INCONCLUSIVE
+    self.print_connection(username, hostname, 'IMAP4')
+
+    socket.socket = defaultsocket
+
+    return TEST_SUCCESS
+
+
+class CheckSMTPMailTest(MailTest):
+  def __init__(self, target_file):
+    MailTest.__init__(self, target_file, "SENDMAILSMTP", 25)
+
+  def check_target(self, target):
+    defaultsocket = socket.socket
+    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,
+                          TorUtil.tor_host, TorUtil.tor_port)
+    socket.socket = socks.socksocket
+
+    username, hostname = target[0].split('@')
+    s = smtplib.SMTP(hostname, 25)
+    content = 'From: %s@%s\r\nTo: brien.smithee@gmail.com\r\nSubject: Going to the party?\r\n\r\nHi Brien,\r\nHow\'s it going? Will you be at the party Tuesday?\r\n\r\nJohn.' % (username, hostname)
+    s.login('%s@%s' % (username, hostname), target[1])
+    s.sendmail('%s@%s' % (username, hostname), 'brien.smithee@gmail.com', content)
+    s.quit()
+    plog('INFO', 'Send mail succeeded')
+
+    exit_node = scanhdlr.get_exit_node()
+    if not exit_node:
+      return TEST_INCONCLUSIVE
+    self.print_connection(username, hostname, 'SMTP', content)
+
+    socket.socket = defaultsocket
+
+    return TEST_SUCCESS
+
+
+class TorrentTest(Test):
+  def __init__(self, filename):
+    self.fetch_queue = []
+    Test.__init__(self, "TORRENT", 80)
+    self.torrent_filename = filename
+
+  def get_targets(self):
+    file_content = open(self.torrent_filename).read()
+    content = bzrlib.bencode.bdecode(file_content)
+    self.content = content
+    hash_ = sha()
+    hash_.update(bzrlib.bencode.bencode(content['info']))
+    self.info_hash = urllib.quote_plus(hash_.digest())
+    self.peer_id = urllib.quote_plus('-UT2210-%012d' % random.randint(0, 999999999999))
+    self.torrent_port = random.randint(1025, 65535)
+    try:
+      self.total_length = sum([h['length'] for h in content['info']['files']])
+    except:
+      self.total_length = 1000000
+    trackers = [content['announce']] + [elem for lst in content['announce-list'] for elem in lst]
+    trackers = [(tracker, 'announce') for tracker in trackers if re.search('^http://', tracker)]
+    print trackers
+    real_trackers = []
+    timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(10)
+    for tracker in trackers:
+      try:
+        print ('%s?info_hash=%s&peer_id=%s&port=%s&uploaded=0&downloaded=0&left=%s&compact=1&event=started&ip=91.121.100.200' %
+          (tracker[0], self.info_hash, self.peer_id, self.torrent_port, self.total_length))
+        urllib.urlopen('%s?info_hash=%s&peer_id=%s&port=%s&uploaded=0&downloaded=0&left=%s&compact=1&event=started&ip=91.121.100.200' %
+          (tracker[0], self.info_hash, self.peer_id, self.torrent_port, self.total_length)).read()
+        real_trackers.append(tracker)
+      except:
+        pass
+    socket.setdefaulttimeout(timeout)
+
+    for tracker, announce in trackers:
+      if not (re.search(':([0-9]+)/', tracker) is None or re.search(':([0-9]+)/', tracker).groups()[0] == '80'):
+        self.port = int(re.search(':([0-9]+)/', tracker).groups()[0])
+
+    return real_trackers
+
+  def run_test(self):
+    try:
+      defaultsocket = socket.socket
+      self.tests_run += 1
+      res = self.check_torrent(random.choice(self.targets)[0][0])
+      socket.socket = defaultsocket
+      return res
+    except Exception as e:
+      plog('WARN', 'Exception when getting torrent for node '+self.current_exit_idhex)
+      print e
+      traceback.print_exc()
+      socket.socket = defaultsocket
+      return TEST_INCONCLUSIVE
+
+  def get_peers(self, result):
+    peers = map(''.join, zip(*[iter(result['peers'])]*6))
+    # Will contain the for bytes of the IP address in order, then the port
+    return set([struct.unpack('>BBBBH', elem) for elem in map(''.join, zip(*[iter(result['peers'])]*6))])
+
+
+  def check_torrent(self, tracker):
+    plog('INFO', 'Getting torrent info by direct connection')
+    print ('%s?info_hash=%s&peer_id=%s&port=%s&uploaded=0&downloaded=0&left=%s&compact=1&event=started&ip=91.121.100.200' %
+      (tracker, self.info_hash, self.peer_id, self.torrent_port, self.total_length))
+    infos = urllib.urlopen('%s?info_hash=%s&peer_id=%s&port=%s&uploaded=0&downloaded=0&left=%s&compact=1&event=started&ip=91.121.100.200' %
+      (tracker, self.info_hash, self.peer_id, self.torrent_port, self.total_length)).read()
+    infos = bzrlib.bencode.bdecode(infos)
+    if infos['complete'] + infos['incomplete'] > 50:
+      plog('WARN', 'Torrents with more than 50 peers not supported')
+      return TEST_INCONCLUSIVE
+    peers = self.get_peers(infos)
+    print ['%s.%s.%s.%s:%s' % p for p in peers]
+
+    if scanhdlr.get_exit_node():
+      return TEST_INCONCLUSIVE
+
+    defaultsocket = socket.socket
+    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,
+                          TorUtil.tor_host, TorUtil.tor_port)
+    socket.socket = socks.socksocket
+
+    infos_tor = urllib.urlopen('%s?info_hash=%s&peer_id=%s&port=%s&uploaded=0&downloaded=0&left=%s&compact=1&event=started&ip=91.121.100.200' %
+      (tracker, self.info_hash, self.peer_id, self.torrent_port, self.total_length)).read()
+    infos_tor = bzrlib.bencode.bdecode(infos_tor)
+    if infos_tor['complete'] + infos_tor['incomplete'] > 50:
+      plog('WARN', 'Torrents with more than 50 peers not supported')
+      return TEST_INCONCLUSIVE
+    tor_peers = self.get_peers(infos_tor)
+    print ['%s.%s.%s.%s:%s' % p for p in tor_peers]
+
+    diff = tor_peers - peers
+    if not (diff == set() or (len(diff) == 1 and list(diff)[0][4] == self.torrent_port)):
+      plog('ERROR', self.proto+' new peers: '+("%s" % (tor_peers - peers))+' for node '+str(scanhdlr.get_exit_node()))
+      socket.socket = defaultsocket
+      return TEST_FAILURE
+
+    socket.socket = defaultsocket
+
+    return TEST_SUCCESS
+
+
 class SMTPSTest(Test):
   def __init__(self):
     Test.__init__(self, "SMTPS", 587)
@@ -2645,6 +2903,8 @@ def usage():
     print '--rescan=<n>'
     print '--ssl'
     print '--http'
+    print '--check-mail=<file>'
+    print '--torrent=<file>'
 #    print '--ssh (doesn\'t work yet)'
 #    print '--smtp (~works)'
 #    print '--pop (~works)'
@@ -2666,7 +2926,7 @@ def main(argv):
 
   TorUtil.read_config(data_dir+"/torctl.cfg")
 
-  opts = ['ssl','rescan', 'pernode=', 'resume=','http','ssh','smtp','pop','imap','dns','dnsrebind','policies','exit=','target=','loglevel=','help']
+  opts = ['ssl','rescan', 'pernode=', 'resume=','http','torrent=','ssh','smtp','check-mail=','pop','imap','dns','dnsrebind','policies','exit=','target=','loglevel=','help']
 
   # make sure the arguments are correct
   try:
@@ -2690,6 +2950,8 @@ def main(argv):
 
   fixed_exits=[]
   fixed_targets=[]
+  do_check_mail = False
+  do_torrent = False
   for flag in flags:
     if flag[0] == "--help":
       usage()
@@ -2713,6 +2975,10 @@ def main(argv):
       else:
         plog("ERROR", "Unknown loglevel: "+flag[1])
         sys.exit(0)
+    if flag[0] == '--check-mail':
+      do_check_mail = flag[1]
+    if flag[0] == '--torrent':
+      do_torrent = flag[1]
 
   plog("DEBUG", "Read tor config. Got Socks proxy: "+str(TorUtil.tor_port))
 
@@ -2742,7 +3008,7 @@ def main(argv):
     scanhdlr.check_all_exits_port_consistency()
 
   # maybe only the consistency test was required
-  if not (do_ssl or do_http):
+  if not (do_ssl or do_http or do_check_mail or do_torrent):
     plog('INFO', 'Done.')
     return
 
@@ -2769,6 +3035,9 @@ def main(argv):
   if do_dns_rebind:
     rebind_data_dir = os.path.join(soat_dir, 'dnsrebind')
     tocheck += [os.path.join(rebind_data_dir, r) for r in rsubdirs]
+  if do_check_mail:
+    tocheck += [check_send_mail_content_dir]
+    tocheck += [os.path.join(check_send_mail_content_dir, r) for r in rsubdirs]
   # TODO: Uncomment relevant sections when tests are reenabled
   #if do_ssh:
   #  ssh_data_dir = os.path.join(soat_dir, 'ssh')
@@ -2812,6 +3081,14 @@ def main(argv):
     if do_http:
       tests["HTTP"] = SearchBasedHTTPTest(filetype_wordlist_file)
 
+  if do_check_mail:
+    tests["POP3MAIL"] = CheckPOP3MailTest(do_check_mail)
+    tests["IMAP4MAIL"] = CheckIMAP4MailTest(do_check_mail)
+    tests["SMTPMAIL"] = CheckSMTPMailTest(do_check_mail)
+
+  if do_torrent:
+    tests["TORRENT"] = TorrentTest(do_torrent)
+
   # maybe no tests could be initialized
   if not tests:
     plog('INFO', 'Done.')
@@ -2847,9 +3124,15 @@ def main(argv):
 
     # Get as much milage out of each exit as we safely can:
     # Run a random subset of our tests in random order
-    n_tests = random.choice(xrange(1,len(avail_tests)+1))
+    can_continue = False
+    while not can_continue:
+      n_tests = random.choice(xrange(1,len(avail_tests)+1))
 
-    to_run = random.sample(avail_tests, n_tests)
+      to_run = random.sample(avail_tests, n_tests)
+      can_continue = True
+      for t in to_run:
+        if t.__class__ == CheckSMTPMailTest and random.randint(0, len(tests['IMAP4MAIL'].nodes) / len(tests['SMTPMAIL'].nodes)) != 0:
+          can_continue = False
 
     common_nodes = None
     # Do set intersection and reuse nodes for shared tests
@@ -2859,7 +3142,8 @@ def main(argv):
       if not common_nodes:
         common_nodes = copy.copy(test.nodes)
       else:
-        common_nodes &= test.nodes
+        common_nodes |= test.nodes
+        print test.nodes
       scanhdlr._sanity_check(map(lambda id: test.node_map[id],
                                              test.nodes))
     print "COMMON NODES"
@@ -2873,7 +3157,9 @@ def main(argv):
     if any_avail:
       plog("DEBUG", "Chose to run "+str(n_tests)+" tests via "+str(current_exit_idhex)+" (tests share "+str(len(common_nodes))+" exit nodes)")
       for test in to_run:
+        test.current_exit_idhex = current_exit_idhex
         result = test.run_test()
+        print test.targets
         if result != TEST_INCONCLUSIVE:
           test.mark_chosen(current_exit_idhex, result)
         datahandler.saveTest(test)
